@@ -1,84 +1,66 @@
 import os
+import telebot
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request
-import telebot
-import threading
-import time
 
-# Токен бота и URL для Webhook из переменных окружения
+# ==== ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ====
 TOKEN = os.environ.get("TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://yourapp.onrender.com
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://vak-avito-bot.onrender.com
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# Хранилище подписанных пользователей и отправленных ссылок
-CHAT_IDS = set()
-sent_links = set()
+# ==== Функция поиска свежих объявлений iPhone ====
+def get_new_iphones():
+    url = "https://www.avito.ru/ufa/telefony/iphone?cd=1&q=iphone+xs+iphone+xr+iphone+11+iphone+12+iphone+13+iphone+14+iphone+15+pro+max"
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.text, "html.parser")
+    ads = []
 
-# Какие модели искать
-VALID_MODELS = ["xs", "xr", "11", "12", "13", "14", "15", "pro", "pro max", "promax"]
+    # Находим блоки с объявлениями
+    for item in soup.find_all("div", {"data-marker": "item"}):
+        try:
+            title_tag = item.find("h3")
+            price_tag = item.find("span", {"data-marker": "item-price"})
+            link_tag = item.find("a", {"class": "iva-item-titleLink"})
 
-# Ссылка на поиск iPhone в Уфе
-SEARCH_URL = "https://www.avito.ru/ufa/telefony?q=iphone"
+            if title_tag and price_tag and link_tag:
+                title = title_tag.text.strip()
+                price = price_tag.text.strip()
+                link = "https://www.avito.ru" + link_tag.get("href")
+                ads.append(f"{title}\nЦена: {price}\nСсылка: {link}")
+        except:
+            continue
 
-# Команда /start
+    return ads[:5]  # берем 5 последних объявлений
+
+# ==== Хендлер команды /start ====
 @bot.message_handler(commands=["start"])
 def start(message):
-    CHAT_IDS.add(message.chat.id)
-    bot.send_message(message.chat.id, "Ты подписан на новые объявления iPhone!")
+    chat_id = message.chat.id
+    bot.send_message(chat_id, "Ты подписан на новые объявления iPhone в Уфе!")
+    new_ads = get_new_iphones()
+    for ad in new_ads:
+        bot.send_message(chat_id, ad)
 
-# Webhook для Telegram
+# ==== Webhook endpoint ====
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     json_string = request.get_data().decode("utf-8")
     update = telebot.types.Update.de_json(json_string)
     bot.process_new_updates([update])
-    return "!", 200
+    return "OK", 200
 
-# Цикл проверки новых объявлений
-def fetch_loop():
-    while True:
-        try:
-            response = requests.get(SEARCH_URL)
-            soup = BeautifulSoup(response.text, "html.parser")
-            items = soup.find_all("div", {"data-marker": "item"})
+# ==== Главная страница для проверки ====
+@app.route("/", methods=["GET"])
+def index():
+    return "Bot is running!", 200
 
-            for item in items:
-                title_tag = item.find("h3")
-                price_tag = item.find("span", {"data-marker": "item-price"})
-                link_tag = item.find("a", {"data-marker": "item-title"})
-
-                if not title_tag or not price_tag or not link_tag:
-                    continue
-
-                title_lower = title_tag.get_text(strip=True).lower()
-                price = price_tag.get_text(strip=True)
-                link = "https://www.avito.ru" + link_tag.get("href")
-
-                if not any(model in title_lower for model in VALID_MODELS):
-                    continue
-
-                if link in sent_links:
-                    continue
-
-                sent_links.add(link)
-                message_text = f"{title_tag.get_text(strip=True)}\nЦена: {price}\nСсылка: {link}"
-
-                for chat_id in CHAT_IDS:
-                    bot.send_message(chat_id, message_text)
-        except Exception as e:
-            print("Ошибка при получении объявлений:", e)
-
-        time.sleep(300)  # каждые 5 минут
-
+# ==== Настройка webhook при запуске ====
 if __name__ == "__main__":
-    # Устанавливаем webhook
     bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL + "/" + TOKEN)
-
-    # Запускаем fetch_loop в отдельном потоке
-    threading.Thread(target=fetch_loop).start()
-
-    # Запускаем Flask
+    bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
