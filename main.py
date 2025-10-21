@@ -1,75 +1,84 @@
 import os
-import time
-import threading
 import requests
 from bs4 import BeautifulSoup
+from flask import Flask, request
 import telebot
-from flask import Flask
+import threading
+import time
 
-# ===== Telegram Bot =====
-TOKEN = os.getenv("TOKEN")
-if not TOKEN:
-    raise ValueError("TOKEN не найден!")
-
+# Токен бота и URL для Webhook из переменных окружения
+TOKEN = os.environ.get("TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://yourapp.onrender.com
 bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-# ===== Flask Ping Server =====
-app = Flask("")
+# Хранилище подписанных пользователей и отправленных ссылок
+CHAT_IDS = set()
+sent_links = set()
 
-@app.route("/")
-def home():
-    return "Bot is running!"
+# Какие модели искать
+VALID_MODELS = ["xs", "xr", "11", "12", "13", "14", "15", "pro", "pro max", "promax"]
 
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+# Ссылка на поиск iPhone в Уфе
+SEARCH_URL = "https://www.avito.ru/ufa/telefony?q=iphone"
 
-threading.Thread(target=run_flask).start()
-
-# ===== Подписчики =====
-subscribers = set()
-
+# Команда /start
 @bot.message_handler(commands=["start"])
-def start_message(message):
-    subscribers.add(message.chat.id)
+def start(message):
+    CHAT_IDS.add(message.chat.id)
     bot.send_message(message.chat.id, "Ты подписан на новые объявления iPhone!")
 
-# ===== Настройки Авито =====
-URL = "https://www.avito.ru/ufa/telefony?q=iphone"
-CHECK_INTERVAL = 300  # 5 минут
-ALREADY_SENT = set()
+# Webhook для Telegram
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    json_string = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(json_string)
+    bot.process_new_updates([update])
+    return "!", 200
 
-# Список моделей iPhone для поиска
-IPHONES = [
-    "iPhone XS", "iPhone XS Max", "iPhone XR",
-    "iPhone 11", "iPhone 11 Pro", "iPhone 11 Pro Max",
-    "iPhone 12", "iPhone 12 Mini", "iPhone 12 Pro", "iPhone 12 Pro Max",
-    "iPhone 13", "iPhone 13 Mini", "iPhone 13 Pro", "iPhone 13 Pro Max",
-    "iPhone 14", "iPhone 14 Plus", "iPhone 14 Pro", "iPhone 14 Pro Max",
-    "iPhone 15", "iPhone 15 Plus", "iPhone 15 Pro", "iPhone 15 Pro Max"
-]
-
-def check_avito():
+# Цикл проверки новых объявлений
+def fetch_loop():
     while True:
         try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            r = requests.get(URL, headers=headers)
-            soup = BeautifulSoup(r.text, "html.parser")
+            response = requests.get(SEARCH_URL)
+            soup = BeautifulSoup(response.text, "html.parser")
+            items = soup.find_all("div", {"data-marker": "item"})
 
-            ads = soup.find_all("a", {"class": "iva-item-titleStep-2bjuh"})
-            for ad in ads:
-                title = ad.text.strip()
-                link = "https://www.avito.ru" + ad.get("href")
-                if any(model in title for model in IPHONES) and link not in ALREADY_SENT:
-                    for user_id in subscribers:
-                        bot.send_message(user_id, f"{title}\n{link}")
-                    ALREADY_SENT.add(link)
+            for item in items:
+                title_tag = item.find("h3")
+                price_tag = item.find("span", {"data-marker": "item-price"})
+                link_tag = item.find("a", {"data-marker": "item-title"})
+
+                if not title_tag or not price_tag or not link_tag:
+                    continue
+
+                title_lower = title_tag.get_text(strip=True).lower()
+                price = price_tag.get_text(strip=True)
+                link = "https://www.avito.ru" + link_tag.get("href")
+
+                if not any(model in title_lower for model in VALID_MODELS):
+                    continue
+
+                if link in sent_links:
+                    continue
+
+                sent_links.add(link)
+                message_text = f"{title_tag.get_text(strip=True)}\nЦена: {price}\nСсылка: {link}"
+
+                for chat_id in CHAT_IDS:
+                    bot.send_message(chat_id, message_text)
         except Exception as e:
-            print("Ошибка при парсинге:", e)
-        time.sleep(CHECK_INTERVAL)
+            print("Ошибка при получении объявлений:", e)
 
-# ===== Запуск парсинга =====
-threading.Thread(target=check_avito).start()
+        time.sleep(300)  # каждые 5 минут
 
-# ===== Запуск бота =====
-bot.infinity_polling()
+if __name__ == "__main__":
+    # Устанавливаем webhook
+    bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL + "/" + TOKEN)
+
+    # Запускаем fetch_loop в отдельном потоке
+    threading.Thread(target=fetch_loop).start()
+
+    # Запускаем Flask
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
