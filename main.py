@@ -1,66 +1,66 @@
-import os
 import telebot
-import requests
-from bs4 import BeautifulSoup
 from flask import Flask, request
+import requests
+import time
+import threading
 
-# ==== ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ====
-TOKEN = os.environ.get("TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://vak-avito-bot.onrender.com
-bot = telebot.TeleBot(TOKEN)
+# === НАСТРОЙКИ ===
+BOT_TOKEN = "8457178929:AAG9Nlej0WJgZ5Ry6m_F98FFPMry6LEdNx8"
+WEBHOOK_URL = "https://vak-avito-bot.onrender.com/" + BOT_TOKEN
+CHAT_ID = None  # сюда бот сам добавит id того, кто напишет /start
+
+bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# ==== Функция поиска свежих объявлений iPhone ====
-def get_new_iphones():
-    url = "https://www.avito.ru/ufa/telefony/iphone?cd=1&q=iphone+xs+iphone+xr+iphone+11+iphone+12+iphone+13+iphone+14+iphone+15+pro+max"
-    headers = {
-        "User-Agent": "Mozilla/5.0"
+# === ПОИСК ОБЪЯВЛЕНИЙ ===
+def get_iphones():
+    url = "https://www.avito.ru/ufa"
+    params = {
+        "q": "iPhone",
     }
-    response = requests.get(url, headers=headers)
-    soup = BeautifulSoup(response.text, "html.parser")
-    ads = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, params=params, headers=headers)
+    text = response.text.lower()
+    iphones = []
+    models = ["xr", "xs", "11", "12", "13", "14", "15", "pro", "pro max"]
+    for model in models:
+        if model in text:
+            iphones.append(f"Найдено объявление с моделью iPhone {model.upper()}")
+    return iphones if iphones else ["Пока ничего нового нет 😔"]
 
-    # Находим блоки с объявлениями
-    for item in soup.find_all("div", {"data-marker": "item"}):
-        try:
-            title_tag = item.find("h3")
-            price_tag = item.find("span", {"data-marker": "item-price"})
-            link_tag = item.find("a", {"class": "iva-item-titleLink"})
+# === ОТПРАВКА ОБЪЯВЛЕНИЙ ===
+def monitor_ads():
+    last_ads = set()
+    while True:
+        iphones = get_iphones()
+        new_ads = set(iphones) - last_ads
+        if new_ads and CHAT_ID:
+            for ad in new_ads:
+                bot.send_message(CHAT_ID, ad)
+        last_ads = set(iphones)
+        time.sleep(300)  # каждые 5 минут
 
-            if title_tag and price_tag and link_tag:
-                title = title_tag.text.strip()
-                price = price_tag.text.strip()
-                link = "https://www.avito.ru" + link_tag.get("href")
-                ads.append(f"{title}\nЦена: {price}\nСсылка: {link}")
-        except:
-            continue
-
-    return ads[:5]  # берем 5 последних объявлений
-
-# ==== Хендлер команды /start ====
-@bot.message_handler(commands=["start"])
+# === ТЕЛЕГРАМ КОМАНДЫ ===
+@bot.message_handler(commands=['start'])
 def start(message):
-    chat_id = message.chat.id
-    bot.send_message(chat_id, "Ты подписан на новые объявления iPhone в Уфе!")
-    new_ads = get_new_iphones()
-    for ad in new_ads:
-        bot.send_message(chat_id, ad)
+    global CHAT_ID
+    CHAT_ID = message.chat.id
+    bot.send_message(CHAT_ID, "🔔 Ты подписан на новые объявления iPhone в Уфе!")
+    threading.Thread(target=monitor_ads, daemon=True).start()
 
-# ==== Webhook endpoint ====
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    json_string = request.get_data().decode("utf-8")
-    update = telebot.types.Update.de_json(json_string)
+# === FLASK (для Webhook) ===
+@app.route('/' + BOT_TOKEN, methods=['POST'])
+def getMessage():
+    json_str = request.stream.read().decode('UTF-8')
+    update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
-    return "OK", 200
+    return '!', 200
 
-# ==== Главная страница для проверки ====
-@app.route("/", methods=["GET"])
-def index():
-    return "Bot is running!", 200
-
-# ==== Настройка webhook при запуске ====
-if __name__ == "__main__":
+@app.route("/")
+def webhook():
     bot.remove_webhook()
-    bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    bot.set_webhook(url=WEBHOOK_URL)
+    return "Webhook установлен!", 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
